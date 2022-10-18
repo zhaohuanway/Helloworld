@@ -1,0 +1,437 @@
+agent {
+
+  # 定义使用Kubernetes作为agent
+
+  kubernetes {
+
+   选择的云为之前配置的名字
+
+   cloud 'kubernetes-study'
+
+   slaveConnectTimeout 1200
+
+  #将workspace改成hostPath，因为该Slave会固定节点创建，如果有存储可用，可以改成PVC的模式
+
+   workspaceVolume hostPathWorkspaceVolume(hostPath: "/opt/workspace", readOnly: false)
+
+   yaml '''
+
+apiVersion: v1
+
+kind: Pod
+
+spec:
+
+ containers:
+
+  # jnlp容器，和Jenkins主节点通信
+
+  - args: ['$(JENKINS_SECRET)', '$(JENKINS_NAME)']
+
+   image: 'registry.cn-beijing.aliyuncs.com/citools/jnlp:alpine'
+
+   name: jnlp
+
+   imagePullPolicy: IfNotPresent
+
+   volumeMounts:
+
+​    - mountPath: "/etc/localtime"
+
+​     name: "localtime"
+
+​     readOnly: false 
+
+  # build容器，包含执行构建的命令，比如Java的需要mvn构建，就可以用一个maven的镜像 
+
+  - command:
+
+​    - "cat"
+
+   env:
+
+​    - name: "LANGUAGE"
+
+​     value: "en_US:en"
+
+​    - name: "LC_ALL"
+
+​     value: "en_US.UTF-8"
+
+​    - name: "LANG"
+
+​     value: "en_US.UTF-8"
+
+  # 使用Maven镜像，包含mvn工具。NodeJS可以用node的镜像
+
+   image: "registry.cn-beijing.aliyuncs.com/citools/maven:3.5.3"
+
+   imagePullPolicy: "IfNotPresent"
+
+  # 容器的名字，流水线的stage可以直接使用该名字
+
+   name: "build"
+
+   tty: true
+
+   volumeMounts:
+
+​    - mountPath: "/etc/localtime"
+
+​     name: "localtime"
+
+​    # Pod单独创建了一个缓存的volume，将其挂载到了maven插件的缓存目录，默认是/root/.m2
+
+​    - mountPath: "/root/.m2/"
+
+​     name: "cachedir"
+
+​     readOnly: false
+
+  # 发版容器，因为最终是发版至Kubernetes的，所以需要有一个kubectl命令
+
+  - command:
+
+​    - "cat"
+
+   env:
+
+​    - name: "LANGUAGE"
+
+​     value: "en_US:en"
+
+​    - name: "LC_ALL"
+
+​     value: "en_US.UTF-8"
+
+​    - name: "LANG"
+
+​     value: "en_US.UTF-8"
+
+  # 镜像的版本可以替换为其他的版本，也可以不替换，因为只执行set命令，所以版本是兼容的
+
+   image: "registry.cn-beijing.aliyuncs.com/citools/kubectl:self-1.17"
+
+   imagePullPolicy: "IfNotPresent"
+
+   name: "kubectl"
+
+   tty: true
+
+   volumeMounts:
+
+​    - mountPath: "/etc/localtime"
+
+​     name: "localtime"
+
+​     readOnly: false
+
+  # 用于生成镜像的容器，需要包含docker命令
+
+  - command:
+
+​    - "cat"
+
+   env:
+
+​    - name: "LANGUAGE"
+
+​     value: "en_US:en"
+
+​    - name: "LC_ALL"
+
+​     value: "en_US.UTF-8"
+
+​    - name: "LANG"
+
+​     value: "en_US.UTF-8"
+
+   image: "registry.cn-beijing.aliyuncs.com/citools/docker:20.10.9-git"
+
+   imagePullPolicy: "IfNotPresent"
+
+   name: "docker"
+
+   tty: true
+
+   volumeMounts:
+
+​    - mountPath: "/etc/localtime"
+
+​     name: "localtime"
+
+​     readOnly: false
+
+​    # 由于容器没有启动docker服务，因此将宿主机的docker直接挂载至容器即可
+
+​    - mountPath: "/var/run/docker.sock"
+
+​     name: "dockersock"
+
+​     readOnly: false
+
+ restartPolicy: "Never"
+
+# 固定节点部署
+
+ nodeSelector:
+
+  build: "true"
+
+ securityContext: {}
+
+ volumes:
+
+  # Docker socket volume
+
+  - hostPath:
+
+​    path: "/var/run/docker.sock"
+
+   name: "dockersock"
+
+  - hostPath:
+
+​    path: "/usr/share/zoneinfo/Asia/Shanghai"
+
+   name: "localtime"
+
+  # 缓存目录
+
+  - name: "cachedir"
+
+   hostPath:
+
+​    path: "/opt/m2"
+
+'''
+
+  }
+
+
+# 定义一些全局的环境变量
+
+environment {
+
+  COMMIT_ID = ""
+
+  HARBOR_ADDRESS = "10.0.0.204" # Harbor地址
+
+  REGISTRY_DIR = "kubernetes"  # Harbor的项目目录
+
+  IMAGE_NAME = "spring-boot-project" # 镜像的名称
+
+  NAMESPACE = "kubernetes" # 该应用在Kubernetes中的命名空间
+
+  TAG = "" # 镜像的Tag，在此用BUILD_TAG+COMMIT_ID组成
+
+ }
+
+ parameters {
+
+  # 之前讲过一些choice、input类型的参数，本次使用的是GitParameter插件
+
+  # 该字段会在Jenkins页面生成一个选择分支的选项
+
+  gitParameter(branch: '', branchFilter: 'origin/(.*)', defaultValue: '', description: 'Branch for build and deploy', name: 'BRANCH', quickFilterEnabled: false, selectedValue: 'NONE', sortMode: 'NONE', tagFilter: '*', type: 'PT_BRANCH')
+
+ }
+
+
+stage('Pulling Code') {
+
+   parallel {
+
+​    stage('Pulling Code by Jenkins') {
+
+​     when {
+
+​      expression {
+
+​      # 若env.gitlabBranch为空，则该流水线为手动触发，执行该stage；若不为空，则会执行同级的另一个stage
+
+​       env.gitlabBranch == null
+
+​      }
+
+ 
+
+​     }
+
+​     steps {
+
+​      # 这里使用git插件拉取代码，BRANCH变量取自前面介绍的parameters配置
+
+​      # git@xxxxxx:root/spring-boot-project.git代码地址
+
+​      # credentialsId: 'gitlab-key'，之前创建的拉取代码的key
+
+​      git(changelog: true, poll: true, url: 'git@xxxxxx:root/ spring-boot-project.git', branch: "${BRANCH}", credentialsId: 'gitlab-key')
+
+​      script {
+
+​      # 定义一些变量用于生成镜像的Tag
+
+​      # 获取最近一次提交的Commit ID
+
+​       COMMIT_ID = sh(returnStdout: true, script: "git log -n 1 --pretty=format:'%h'").trim()
+
+​      # 赋值给TAG变量，后面的docker build可以取到该TAG的值
+
+​       TAG = BUILD_TAG + '-' + COMMIT_ID
+
+​       println "Current branch is ${BRANCH}, Commit ID is ${COMMIT_ID}, Image TAG is ${TAG}"
+
+ 
+
+​      }
+
+ 
+
+​     }
+
+​    }
+
+​    stage('Pulling Code by trigger') {
+
+​     when {
+
+​      expression {
+
+​      # 如果env.gitlabBranch不为空，说明该流水线是通过webhook触发的，则此时执行该stage，上述的stage不再执行。此时BRANCH变量为空
+
+​       env.gitlabBranch != null
+
+​      }
+
+ 
+
+​     }
+
+​     steps {
+
+​      # 以下配置和前面一致，只是此时branch: env.gitlabBranch取的值为env.gitlabBranch
+
+​      git(url: 'git@xxxxxxxxxxx:root/spring-boot-project.git', branch: env.gitlabBranch, changelog: true, poll: true, credentialsId: 'gitlab-key')
+
+​      script {
+
+​       COMMIT_ID = sh(returnStdout: true, script: "git log -n 1 --pretty=format:'%h'").trim()
+
+​       TAG = BUILD_TAG + '-' + COMMIT_ID
+
+​       println "Current branch is ${env.gitlabBranch}, Commit ID is ${COMMIT_ID}, Image TAG is ${TAG}"
+
+​      }
+
+ 
+
+​     }
+
+​    }
+
+ 
+
+   }
+
+  }
+
+stage('Building') {
+
+   steps {
+
+​    # 使用Pod模板里面的build容器进行构建
+
+​    container(name: 'build') {
+
+​      sh """
+
+​      # 编译命令，需要根据自己项目的实际情况进行修改，可能会不一致
+
+​       mvn clean install -DskipTests
+
+​      # 构建完成后，一般情况下会在target目录下生成jar包
+
+​       ls target/*
+
+​      """
+
+​    }
+
+   }
+
+  }
+
+
+stage('Docker build for creating image') {
+
+  # 首先取出HARBOR的账号和密码
+
+environment {
+
+​    HARBOR_USER   = credentials('HARBOR_ACCOUNT')
+
+  }
+
+   steps {
+
+​    # 指定使用docker容器
+
+​    container(name: 'docker') {
+
+​     sh """
+
+​     # 执行build命令，Dockerfile会在下一小节创建，也是放在代码仓库，和Jenkinsfile同级
+
+​     docker build -t ${HARBOR_ADDRESS}/${REGISTRY_DIR}/${IMAGE_NAME}:${TAG} .
+
+​     # 登录Harbor，HARBOR_USER_USR和HARBOR_USER_PSW由上述environment生成
+
+​     docker login -u ${HARBOR_USER_USR} -p ${HARBOR_USER_PSW} ${HARBOR_ADDRESS}
+
+​     # 将镜像推送至镜像仓库
+
+​     docker push ${HARBOR_ADDRESS}/${REGISTRY_DIR}/${IMAGE_NAME}:${TAG}
+
+​     """
+
+​    }
+
+   }
+
+  }
+
+最后一步就是将该镜像发版至Kubernetes集群中，此时使用的是包含kubectl命令的容器：
+
+stage('Deploying to k8s') {
+
+  # 获取连接Kubernetes集群证书 
+
+environment {
+
+​    MY_KUBECONFIG = credentials('study-k8s-kubeconfig')
+
+  }
+
+   steps {
+
+​    # 指定使用kubectl容器
+
+​    container(name: 'kubectl'){
+
+​      sh """
+
+​     # 直接set更改Deployment的镜像即可
+
+​      /usr/local/bin/kubectl --kubeconfig $MY_KUBECONFIG set image deploy -l app=${IMAGE_NAME} ${IMAGE_NAME}=${HARBOR_ADDRESS}/${REGISTRY_DIR}/${IMAGE_NAME}:${TAG} -n $NAMESPACE
+
+​      """
+
+​    }
+
+   }
+
+  }
+
+ }
+
